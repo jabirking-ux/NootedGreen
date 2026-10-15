@@ -9,37 +9,68 @@ on:
 jobs:
   build:
     runs-on: macos-15
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+      - name: Prepare artifacts
+        run: mkdir -p artifacts "$RUNNER_TEMP/ng-build"
 
       - name: Build NootedGreen
+        shell: bash
         run: |
+          set +e
+
           xcodebuild \
             -project NootedGreen.xcodeproj \
             -scheme NootedGreen \
             -configuration Release \
             -sdk macosx \
-            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/build" \
+            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/ng-build" \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build > artifacts/build.log 2>&1
 
-      - name: Package kext
-        run: |
-          find "$RUNNER_TEMP/build" \
+          RESULT=$?
+          echo "$RESULT" > artifacts/build-exit-code.txt
+
+          echo "Searching for compiled kext..."
+          find "$RUNNER_TEMP" \
             -name 'NootedGreen.kext' -type d \
-            -print
-          cd "$RUNNER_TEMP/build"
-          zip -r "$GITHUB_WORKSPACE/NootedGreen-build.zip" \
-            NootedGreen.kext
+            -print >> artifacts/kext-paths.txt
 
-      - name: Upload build
+          KEXT=$(find "$RUNNER_TEMP" \
+            -name 'NootedGreen.kext' -type d -print -quit)
+
+          if [ -n "$KEXT" ]; then
+            ditto -c -k --sequesterRsrc --keepParent \
+              "$KEXT" artifacts/NootedGreen.kext.zip
+            echo "Kext packaged successfully."
+          else
+            echo "No NootedGreen.kext was produced."
+          fi
+
+      - name: Upload build results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: NootedGreen-build
-          path: NootedGreen-build.zip
+          name: NootedGreen-build-results
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: Report build status
+        if: always()
+        shell: bash
+        run: |
+          if [ -f artifacts/build-exit-code.txt ]; then
+            RESULT=$(cat artifacts/build-exit-code.txt)
+            if [ "$RESULT" != "0" ]; then
+              echo "Xcode build failed. Download build.log from the artifact."
+              exit 1
+            fi
+          else
+            echo "Build did not start successfully."
+            exit 1
+          fi
