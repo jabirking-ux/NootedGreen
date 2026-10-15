@@ -1,0 +1,45 @@
+
+name: Build NootedGreen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build NootedGreen
+        run: |
+          xcodebuild \
+            -project NootedGreen.xcodeproj \
+            -scheme NootedGreen \
+            -configuration Release \
+            -sdk macosx \
+            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package kext
+        run: |
+          find "$RUNNER_TEMP/build" \
+            -name 'NootedGreen.kext' -type d \
+            -print
+          cd "$RUNNER_TEMP/build"
+          zip -r "$GITHUB_WORKSPACE/NootedGreen-build.zip" \
+            NootedGreen.kext
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: NootedGreen-build
+          path: NootedGreen-build.zip
