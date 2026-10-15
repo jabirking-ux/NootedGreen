@@ -20,9 +20,33 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Prepare output folder
+      - name: Set up diagnostics
         shell: bash
-        run: mkdir -p artifacts
+        run: |
+          mkdir -p artifacts
+          echo "GitHub Actions runner initialized." \
+            > artifacts/upload-test.txt
+
+      - name: Inspect Xcode project
+        shell: bash
+        run: |
+          {
+            echo "=== Xcode version ==="
+            xcodebuild -version
+
+            echo "=== Available schemes ==="
+            xcodebuild -list \
+              -project NootedGreen.xcodeproj
+
+            echo "=== Project files ==="
+            find . -maxdepth 4 \
+              \( -name '*.xcscheme' \
+                 -o -name 'Package.swift' \
+                 -o -name '*.xcodeproj' \) \
+              -print
+          } > artifacts/project-info.txt 2>&1
+
+          cat artifacts/project-info.txt
 
       - name: Build NootedGreen
         shell: bash
@@ -34,57 +58,61 @@ jobs:
             -scheme NootedGreen \
             -configuration Release \
             -sdk macosx \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
-            build > build.log 2>&1
+            build > artifacts/build.log 2>&1
 
           RESULT=$?
           echo "$RESULT" > artifacts/build-exit-code.txt
-          cp build.log artifacts/build.log
 
-          echo "Xcode exit code: $RESULT"
+          echo "xcodebuild exit code: $RESULT"
+          tail -n 100 artifacts/build.log
 
-          if [ "$RESULT" -ne 0 ]; then
-            echo "Build failed. See build.log in the artifact."
-          fi
-
-      - name: Collect compiled products
+      - name: Collect build products
         if: always()
         shell: bash
         run: |
           {
-            echo "=== Repository and runner build products ==="
-
+            echo "=== .kext directories ==="
             find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
-              -name 'NootedGreen.kext' -type d \
+              -type d -name '*.kext' -print 2>/dev/null
+
+            echo "=== Executables and products ==="
+            find "$RUNNER_TEMP/DerivedData" \
+              -maxdepth 8 \
+              \( -name 'NootedGreen' \
+                 -o -name '*.framework' \
+                 -o -name '*.dylib' \
+                 -o -name '*.a' \
+                 -o -name '*.kext' \) \
               -print 2>/dev/null
 
-            echo "=== Xcode build settings ==="
-
+            echo "=== Build settings ==="
             xcodebuild \
               -project NootedGreen.xcodeproj \
               -scheme NootedGreen \
+              -configuration Release \
               -showBuildSettings 2>&1 |
               grep -E \
-                ' (TARGET_BUILD_DIR|BUILT_PRODUCTS_DIR|FULL_PRODUCT_NAME) =' \
+                ' (TARGET_NAME|PRODUCT_NAME|FULL_PRODUCT_NAME|PRODUCT_TYPE|BUILT_PRODUCTS_DIR|TARGET_BUILD_DIR|MACH_O_TYPE) =' \
               || true
           } > artifacts/diagnostics.txt
 
-          echo "GitHub Actions artifact upload test" \
-            > artifacts/upload-test.txt
+          cat artifacts/diagnostics.txt
 
           KEXT_PATH=$(find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
-            -name 'NootedGreen.kext' -type d \
+            -type d -name 'NootedGreen.kext' \
             -print -quit 2>/dev/null)
 
           if [ -n "$KEXT_PATH" ]; then
             ditto -c -k --sequesterRsrc --keepParent \
               "$KEXT_PATH" artifacts/NootedGreen.kext.zip
-            echo "Packaged: $KEXT_PATH"
+            echo "Kext archived: $KEXT_PATH"
           else
-            echo "No compiled NootedGreen.kext found."
+            echo "No NootedGreen.kext found."
           fi
 
-      - name: Upload build artifacts and logs
+      - name: Upload logs and products
         if: always()
         uses: actions/upload-artifact@v6
         with:
@@ -93,17 +121,26 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Set final build status
+      - name: Report result
         if: always()
         shell: bash
         run: |
-          if [ -f artifacts/build-exit-code.txt ]; then
-            RESULT=$(cat artifacts/build-exit-code.txt)
-            if [ "$RESULT" != "0" ]; then
-              echo "Xcode build failed. Download the logs."
-              exit 1
-            fi
-          else
-            echo "Xcode build did not produce an exit code."
+          if [ ! -f artifacts/build-exit-code.txt ]; then
+            echo "Build step did not record an exit code."
             exit 1
           fi
+
+          RESULT=$(cat artifacts/build-exit-code.txt)
+
+          if [ "$RESULT" != "0" ]; then
+            echo "Xcode build failed. Download build.log."
+            exit 1
+          fi
+
+          if [ ! -f artifacts/NootedGreen.kext.zip ]; then
+            echo "Build succeeded, but the expected kext was not found."
+            echo "Check diagnostics.txt and project-info.txt."
+            exit 1
+          fi
+
+          echo "NootedGreen.kext.zip was created."
