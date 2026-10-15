@@ -4,20 +4,25 @@ name: Build NootedGreen
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-15
 
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      - name: Prepare artifacts
-        run: mkdir -p artifacts "$RUNNER_TEMP/ng-build"
+      - name: Prepare output folder
+        shell: bash
+        run: mkdir -p artifacts
 
       - name: Build NootedGreen
         shell: bash
@@ -29,48 +34,76 @@ jobs:
             -scheme NootedGreen \
             -configuration Release \
             -sdk macosx \
-            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/ng-build" \
             CODE_SIGNING_ALLOWED=NO \
-            build > artifacts/build.log 2>&1
+            build > build.log 2>&1
 
           RESULT=$?
           echo "$RESULT" > artifacts/build-exit-code.txt
+          cp build.log artifacts/build.log
 
-          echo "Searching for compiled kext..."
-          find "$RUNNER_TEMP" \
-            -name 'NootedGreen.kext' -type d \
-            -print >> artifacts/kext-paths.txt
+          echo "Xcode exit code: $RESULT"
 
-          KEXT=$(find "$RUNNER_TEMP" \
-            -name 'NootedGreen.kext' -type d -print -quit)
-
-          if [ -n "$KEXT" ]; then
-            ditto -c -k --sequesterRsrc --keepParent \
-              "$KEXT" artifacts/NootedGreen.kext.zip
-            echo "Kext packaged successfully."
-          else
-            echo "No NootedGreen.kext was produced."
+          if [ "$RESULT" -ne 0 ]; then
+            echo "Build failed. See build.log in the artifact."
           fi
 
-      - name: Upload build results
+      - name: Collect compiled products
         if: always()
-        uses: actions/upload-artifact@v4
+        shell: bash
+        run: |
+          {
+            echo "=== Repository and runner build products ==="
+
+            find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
+              -name 'NootedGreen.kext' -type d \
+              -print 2>/dev/null
+
+            echo "=== Xcode build settings ==="
+
+            xcodebuild \
+              -project NootedGreen.xcodeproj \
+              -scheme NootedGreen \
+              -showBuildSettings 2>&1 |
+              grep -E \
+                ' (TARGET_BUILD_DIR|BUILT_PRODUCTS_DIR|FULL_PRODUCT_NAME) =' \
+              || true
+          } > artifacts/diagnostics.txt
+
+          echo "GitHub Actions artifact upload test" \
+            > artifacts/upload-test.txt
+
+          KEXT_PATH=$(find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
+            -name 'NootedGreen.kext' -type d \
+            -print -quit 2>/dev/null)
+
+          if [ -n "$KEXT_PATH" ]; then
+            ditto -c -k --sequesterRsrc --keepParent \
+              "$KEXT_PATH" artifacts/NootedGreen.kext.zip
+            echo "Packaged: $KEXT_PATH"
+          else
+            echo "No compiled NootedGreen.kext found."
+          fi
+
+      - name: Upload build artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
           name: NootedGreen-build-results
           path: artifacts/
           if-no-files-found: error
+          retention-days: 7
 
-      - name: Report build status
+      - name: Set final build status
         if: always()
         shell: bash
         run: |
           if [ -f artifacts/build-exit-code.txt ]; then
             RESULT=$(cat artifacts/build-exit-code.txt)
             if [ "$RESULT" != "0" ]; then
-              echo "Xcode build failed. Download build.log from the artifact."
+              echo "Xcode build failed. Download the logs."
               exit 1
             fi
           else
-            echo "Build did not start successfully."
+            echo "Xcode build did not produce an exit code."
             exit 1
           fi
